@@ -34,8 +34,27 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in current_app.config['ALLOWED_EXTENSIONS']
 
+def middleware_logger(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        current_app.logger.info(f"Request by user: {request.headers.get('X-User')} to endpoint: {request.path} using method: {request.method}")
+
+        response = f(*args, **kwargs)
+        
+        # Ensure the response is a Flask Response object before trying to log its status code.
+        if not isinstance(response, (str, tuple)):
+            response_obj = response
+        else:
+            response_obj = current_app.make_response(response)
+
+        current_app.logger.info(f"Response status: {response_obj.status_code}")
+
+        return response_obj
+    return decorated_function
+
 @main.route('/')
 @secure_headers_decorator
+@middleware_logger
 def home():
     return "LogServe API is running!"
 
@@ -62,6 +81,7 @@ def login_required(f):
 
 @main.route('/admin_dashboard')
 @secure_headers_decorator
+@middleware_logger
 @admin_required
 def admin_dashboard():
     user_id = request.headers.get('X-User')
@@ -70,6 +90,7 @@ def admin_dashboard():
 
 @main.route('/upload', methods=['POST'])
 @secure_headers_decorator
+@middleware_logger
 @login_required
 def upload_log():
     # If this line is reached, the user is already authorized
