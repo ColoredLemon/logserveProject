@@ -3,6 +3,8 @@ from flask import Blueprint, jsonify, request, make_response, current_app
 import os
 from werkzeug.utils import secure_filename
 from parser import count_lines
+import boto3
+import tempfile
 
 main = Blueprint('main', __name__)
 
@@ -96,7 +98,7 @@ def upload_log():
     # If this line is reached, the user is already authorized
     user_id = request.headers.get('X-User')
     current_app.logger.info(f"Authorized request received from user: {user_id}")
-    
+
     # 1. Get the file part from the request
     if 'file' not in request.files:
         return jsonify({"error": "No file part in the request"}), 400
@@ -110,23 +112,38 @@ def upload_log():
     if not allowed_file(file.filename):
         current_app.logger.warning("User attempted to upload disallowed file type.")
         return jsonify({"error": "Disallowed file type."}), 400
-    
-    # 3. Process the file only if all checks pass
-    #    (The if request.content_length check is handled by Flask's config)
-    #    (The code that was here before is now the only place file is handled)
-    
-    # 4. Save the file to a temporary location using the sanitized filename
+
+    # 3. Create a temporary file and save the uploaded data to it
     sanitized_filename = secure_filename(file.filename)
-    temp_filepath = os.path.join('/tmp', sanitized_filename)
-    file.save(temp_filepath)
-
-    # 5. Call your logparse function on the temporary file
-    line_count, error_msg = count_lines(temp_filepath)
     
-    # 6. Remove the temporary file
-    os.remove(temp_filepath)
+    # Use tempfile to create a secure temporary file
+    temp_file = tempfile.NamedTemporaryFile(delete=False)
+    temp_file.write(file.read())
+    temp_file.close()
 
-    if error_msg:
-        return jsonify({"error": error_msg}), 500
+    try:
+        # 4. Call your logparse function on the temporary file's path
+        line_count, error_msg = count_lines(temp_file.name)
+
+        if error_msg:
+            return jsonify({"error": error_msg}), 500
+
+        # 5. Upload the temporary file to S3
+        s3 = boto3.client(
+            's3',
+            aws_access_key_id=current_app.config['AWS_ACCESS_KEY_ID'],
+            aws_secret_access_key=current_app.config['AWS_SECRET_ACCESS_KEY']
+        )
+        bucket_name = current_app.config['BOTO3_BUCKET_NAME']
+        s3.upload_file(temp_file.name, bucket_name, sanitized_filename)
+
+        return jsonify({"message": f"File '{sanitized_filename}' processed and uploaded to S3 successfully", "line_count": line_count}), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Failed to upload file to S3: {e}")
+        return jsonify({"error": "Failed to upload file to storage"}), 500
     
-    return jsonify({"message": f"File '{sanitized_filename}' processed successfully", "line_count": line_count}), 200
+    finally:
+        # 6. Ensure the temporary file is always removed
+        if os.path.exists(temp_file.name):
+            os.remove(temp_file.name)
